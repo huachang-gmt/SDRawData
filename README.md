@@ -573,7 +573,7 @@ void Write_Data_Log(uint8_t *single_entry_52b)
 
   hsd1.State = HAL_SD_STATE_READY; 
   
-  volatile uint32_t i = 0;
+  volatile uint32_t i = 0; 
 
   // 4. 開始連續 多 次的實體磁區全速寫入測試
   for(i = 0; i < 900; i++)
