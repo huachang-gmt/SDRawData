@@ -539,3 +539,100 @@ void Write_Data_Log(uint8_t *single_entry_52b)
 這就是為什麼你一次丟 4 KB（4096 Byte）過去，SD 卡的 FIFO 可以「啪」一聲在 390us 內毫無壓力地全數吞下。
 
 ---
+
+## 💡 要觀測「MCU傳輸 + SD卡物理燒錄」的總時間，正確的思維是：在發動寫入前拉高（SET），在卡片真正回覆 TRANSFER 狀態（燒錄完畢）的那個瞬間拉低（RESET）。
+
+```c
+
+  /* USER CODE BEGIN 2 */
+
+  // 初始化先設定為低電位
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); // PA6 在這裡拉低！
+
+  // 1. 強迫將 SD 卡與 MCU 暫存器狀態重設回初始狀態
+  HAL_SD_DeInit(&hsd1); 
+  HAL_Delay(100); // 讓電壓與線路沉澱一下
+  
+  // 2. 重新初始化 SDMMC 硬體，確保所有中斷 Flag、DMA 狀態完全清空
+  if (HAL_SD_Init(&hsd1) != HAL_OK)
+  {
+      BSP_LED_On(LED_RED); // 如果連重新初始化都失敗，亮紅燈卡死
+      while(1);
+  }
+
+  // 1. 初始化測試資料：將 4096 位元組的緩衝區填入固定數值（例如 0xAA）
+  for(uint16_t idx = 0; idx < 4096; idx++)
+  {
+      log_buffer[idx] = 0xAA; 
+  }
+
+  // 2. 開機安全延遲，點亮綠燈 2 秒，隨後熄滅，準備進入測試
+  BSP_LED_On(LED_GREEN);
+  HAL_Delay(2000);
+  BSP_LED_Off(LED_GREEN);
+
+  hsd1.State = HAL_SD_STATE_READY; 
+  
+  volatile uint32_t i = 0;
+
+  // 4. 開始連續 多 次的實體磁區全速寫入測試
+  for(i = 0; i < 900; i++)
+  {
+      // 【防禦守衛】雖然去掉了 while，但在發動下一輪傳輸前，
+      // 必須確保硬體狀態已經從上一次的中斷中恢復為 READY。
+      while(hsd1.State != HAL_SD_STATE_READY)
+      {
+          __NOP(); 
+      }
+
+      uint32_t card_ready_timeout = 0x3FFFFFF;
+      while(card_ready_timeout--)
+      {
+          // 這段代碼就是在向 SD 卡發送 CMD13 詢問它燒完沒。
+          if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER)
+          {
+              break; 
+          }
+          __NOP();
+      }
+      if(card_ready_timeout == 0)
+      {
+          BSP_LED_On(LED_RED); // 卡片物理逾時鎖死
+          while(1);
+      }
+
+      /* ==================== 💡 【示波器觀測終點】 ==================== 
+         既然防禦守衛放行了，代表上一輪的「傳輸 + 實體燒錄」在這一刻徹底完工！
+         我們趕緊在發動新一輪之前，把 PA6 拉低！
+      ================================================================ */
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
+      
+      BSP_LED_On(LED_YELLOW); // 點亮黃燈代表進入傳輸階段  MCU 將資料傳輸到 SD 卡的 FIFO ，不包含 真正寫入到 SD 卡的 flash
+        
+      /* ==================== 🚀 【示波器觀測起點】 ==================== 
+         新一輪的寫入即將被發動，立刻把 PA6 拉高！
+      ================================================================ */
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
+
+
+      // 確保 IDMA 抓到的資料絕對 100% 寫入完成
+      __DSB();
+
+      hsd1.ErrorCode = HAL_SD_ERROR_NONE;      
+
+      // 修正後：讓起始地址隨著 i 跨步前進，每一次前進 8 個磁區 (i * sector_count)
+      sd_res = HAL_SD_WriteBlocks_DMA(&hsd1, log_buffer, start_sector + (i * sector_count), sector_count);
+
+      // 如果發射失敗（例如總線衝突或參數錯誤），立刻亮紅燈卡死
+      if(sd_res != HAL_OK)
+      {
+          BSP_LED_On(LED_RED);
+          while(1);
+      }
+
+      /* ==================== 【示波器觀測終點】 ==================== */
+
+  }
+
+```
+- 測量結果： 需花費 2ms 才可以把 raw data 完全寫入 SD 卡 內
