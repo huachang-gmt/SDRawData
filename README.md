@@ -580,7 +580,7 @@ void Write_Data_Log(uint8_t *single_entry_52b)
   {
       // 【防禦守衛】雖然去掉了 while，但在發動下一輪傳輸前，
       // 必須確保硬體狀態已經從上一次的中斷中恢復為 READY。
-      while(hsd1.State != HAL_SD_STATE_READY)
+      while(hsd1.State != HAL_SD_STATE_READY)  //實際燒錄到 SD 卡的等待
       {
           __NOP(); 
       }
@@ -589,7 +589,7 @@ void Write_Data_Log(uint8_t *single_entry_52b)
       while(card_ready_timeout--)
       {
           // 這段代碼就是在向 SD 卡發送 CMD13 詢問它燒完沒。
-          if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER)
+          if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) //實際燒錄到 SD 卡的等待
           {
               break; 
           }
@@ -600,6 +600,11 @@ void Write_Data_Log(uint8_t *single_entry_52b)
           BSP_LED_On(LED_RED); // 卡片物理逾時鎖死
           while(1);
       }
+
+    /*
+       上面兩個 while 就是要等待 資料是否已經確實寫入 SD 卡內的 等待時間
+    */
+
 
       /* ==================== 💡 【示波器觀測終點】 ==================== 
          既然防禦守衛放行了，代表上一輪的「傳輸 + 實體燒錄」在這一刻徹底完工！
@@ -636,3 +641,4 @@ void Write_Data_Log(uint8_t *single_entry_52b)
 
 ```
 - 測量結果： 需花費 2ms 才可以把 raw data 完全寫入 SD 卡 內
+- 量到的這 0.4ms（390 us），「只」包含了 MCU 傳輸資料到 SD 卡 FIFO 的時間，它「完全不包含」資料從 FIFO 寫到 SD 卡 Flash 的物理燒錄時間。
