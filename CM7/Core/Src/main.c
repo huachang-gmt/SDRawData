@@ -166,6 +166,9 @@ Error_Handler();
   HAL_Delay(2000);
   BSP_LED_Off(LED_YELLOW);
 
+
+
+
   /* USER CODE BEGIN 2 */
 
   // 1. 強迫將 SD 卡與 MCU 暫存器狀態重設回初始狀態
@@ -190,70 +193,79 @@ Error_Handler();
   HAL_Delay(2000);
   BSP_LED_Off(LED_GREEN);
 
+  hsd1.State = HAL_SD_STATE_READY; 
   
   volatile uint32_t i = 0;
 
-  // 4. 開始連續 10 次的實體磁區全速寫入測試
-  for(i = 0; i < 20; i++)
+  // 4. 開始連續 多 次的實體磁區全速寫入測試
+  for(i = 0; i < 100; i++)
   {
-      BSP_LED_On(LED_YELLOW);
+      // 【防禦守衛】雖然去掉了 while，但在發動下一輪傳輸前，
+      // 必須確保硬體狀態已經從上一次的中斷中恢復為 READY。
+      while(hsd1.State != HAL_SD_STATE_READY)
+      {
+          __NOP(); 
+      }
+
+      uint32_t card_ready_timeout = 0x3FFFFFF;
+      while(card_ready_timeout--)
+      {
+          // 這段代碼就是在向 SD 卡發送 CMD13 詢問它燒完沒。
+          if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER)
+          {
+              break; 
+          }
+          __NOP();
+      }
+      if(card_ready_timeout == 0)
+      {
+          BSP_LED_On(LED_RED); // 卡片物理逾時鎖死
+          while(1);
+      }
     
+      BSP_LED_On(LED_YELLOW); // 點亮黃燈代表進入傳輸階段  MCU 將資料傳輸到 SD 卡的 FIFO ，不包含 真正寫入到 SD 卡的 flash
+        
       /* ==================== 【示波器觀測起點】 ==================== */
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); // PA6 拉高
 
       // 確保 IDMA 抓到的資料絕對 100% 寫入完成
       __DSB();
 
-      hsd1.State = HAL_SD_STATE_READY; 
       hsd1.ErrorCode = HAL_SD_ERROR_NONE;      
 
       // 修正後：讓起始地址隨著 i 跨步前進，每一次前進 8 個磁區 (i * sector_count)
       sd_res = HAL_SD_WriteBlocks_DMA(&hsd1, log_buffer, start_sector + (i * sector_count), sector_count);
 
-      if(sd_res == HAL_OK)
-      {
-          uint32_t timeout = 0x3FFFFFF; 
-          
-          while(timeout--)
-          {
-              // 官方標準：當 DMA 傳輸完成，hsd1.State 會被硬體自動恢復成 HAL_SD_STATE_READY
-              if(hsd1.State == HAL_SD_STATE_READY)
-              {
-                  break;
-              }
-              __NOP();
-          }
-
-          // 如果超時，手動判定失敗
-          if(timeout == 0)
-          {
-              sd_res = HAL_ERROR;
-          }
-      }
-
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); // PA6 拉低
-      /* ==================== 【示波器觀測終點】 ==================== */
-
-      BSP_LED_Off(LED_YELLOW);
-
-
-      // 如果硬體搬移階段就大出錯，立刻亮紅燈並卡死
+      // 如果發射失敗（例如總線衝突或參數錯誤），立刻亮紅燈卡死
       if(sd_res != HAL_OK)
       {
           BSP_LED_On(LED_RED);
           while(1);
       }
 
-      HAL_Delay(200); 
+      /* ==================== 【示波器觀測終點】 ==================== */
 
   }
 
-  // 5. 10 次成功跑完！3燈全部恆亮慶祝！
+  // 以下兩個 while 是為了確保 SD 卡 寫入都完成，讓三個 LED 都點亮 所設置，並不是必要的。
+  /* ========================================================
+     【最後一哩路守衛】：強迫等待最後一次 (i=9) 的 DMA 中斷完全結束
+     ======================================================== */
+  while(hsd1.State != HAL_SD_STATE_READY)
+  {
+      __NOP(); 
+  }
+  
+  // 確保最後一次卡片內部的 Flash 也燒錄完成了
+  while(HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
+  {
+      __NOP();
+  }
+
+  // 10 次寫入全部真正安全完工！此時點亮三燈，黃燈就不會再被中斷熄滅了！
   BSP_LED_On(LED_GREEN);
   BSP_LED_On(LED_YELLOW);
   BSP_LED_On(LED_RED);
-
-
 
   /* USER CODE END 2 */
 
@@ -345,13 +357,26 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* USER CODE BEGIN 4 */
-// 當 DMA 把 512 位元組完全轟進 SD 卡後，硬體中斷會自動跳進這裡
+
+/**
+  * @brief IDMA 中斷程式 ISR 
+  * @retval None
+  */
+// 當 DMA 把 4096 位元組完全 『傳輸』 到  SD 卡 的 FIFO 之後，硬體中斷會自動跳進這裡
+// 要注意區隔，傳輸到 SD 卡的 FIFO 是一件事，從 FIFO 把資料寫到 SD 卡內的 flash 又是一件事情，兩件事情各自佔用時間
+// 傳輸到 SD 卡的 FIFO 目前量測的時間是 0.4ms 
 void HAL_SD_TxCpltCallback(SD_HandleTypeDef *hsd)
 {
-    // 這裡可以留空，或者放一個測試旗標。
-    // 它的存在是為了告訴 HAL 庫：中斷已經正確處理，請將狀態更新為 TRANSFER
+    if(hsd->Instance == SDMMC1)
+    {
+        /* ==================== 【示波器觀測終點】 ==================== */
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); // PA6 在這裡拉低！
+        
+        BSP_LED_Off(LED_YELLOW); // 熄滅黃燈，代表這趟總線傳輸任務搞定
+    }
 }
+
+
 
 void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
 {
