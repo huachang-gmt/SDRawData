@@ -416,3 +416,22 @@ Sector 20000
 - 建立完整 Wear-Leveling 策略
 
 ---
+
+# 📌 CubeMX 設定圖示：
+
+![System Core](images/STM32Develop-002.png)
+![System Core](images/STM32Develop-003.png)
+![System Core](images/STM32Develop-004.png)
+![System Core](images/STM32Develop-005.png)
+![System Core](images/STM32Develop-006.png)
+![System Core](images/STM32Develop-007.png)
+![Connectivity](images/STM32Develop-008.png)
+![Connectivity](images/STM32Develop-009.png)
+![Connectivity](images/STM32Develop-010.png)
+![Middleware and Software Packs](images/STM32Develop-011.png)
+
+---
+
+
+
+
